@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}石刻补拍灯位选择{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>石刻浅刻线 · 补拍灯位选择</h1>
+  <nav><a href="{{ url_for('index') }}">新建案例</a>
+       <a href="{{ url_for('demo') }}">载入演示数据</a></nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+<footer>
+  约束：反射向量 z≥0；|照明向量·反射向量 − 实拍灰度| ≤ 2；
+  备选灯全区预测灰度须落在 [5, 250]。Pillow 读图 · SciPy/HiGHS 求解。
+</footer>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,344 @@
+{% extends "base.html" %}
+{% block title %}点选刻线/底面与灯位推荐{% endblock %}
+{% block content %}
+{% if not case_id %}
+<section class="card">
+  <h2>案例不存在</h2>
+  <p>该案例已过期或未创建，请<a href="{{ url_for('index') }}">重新上传</a>。</p>
+</section>
+{% else %}
+<section class="card">
+  <h2>2. 原照与可靠标记</h2>
+  <p class="hint">
+    全区共用同一个排除选择，至多排除一张原照；被标为可靠的照片必须保留，
+    不能作为排除候选。更改标记后将自动重新求解并更新推荐。
+  </p>
+  <div id="thumbs" class="thumbs"></div>
+</section>
+
+<section class="card">
+  <h2>3. 点选刻线与底面像素对（1～4 对，每对两点不同）</h2>
+  <div class="pick-toolbar">
+    <button id="start-pair" type="button">＋ 添加点对</button>
+    <button id="cancel-pair" type="button" hidden>取消当前点对</button>
+    <span id="pick-hint" class="hint"></span>
+  </div>
+  <div class="pick-area">
+    <div id="pick-frame" class="pick-frame">
+      <img id="pick-img" alt="放大裁片（点击像素）">
+      <canvas id="pick-canvas"></canvas>
+    </div>
+    <div>
+      <h3>已选点对</h3>
+      <ol id="pair-list"></ol>
+      <p class="hint">刻线＝红，底面＝蓝。点击列表项可删除该对。</p>
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>4. 求解与推荐</h2>
+  <button id="solve-btn" class="primary" type="button">求解灯位</button>
+  <span id="stale-note" class="warn" hidden>
+    标记或点对已变更，下方为旧结果——正在重新求解…
+  </span>
+  <div id="result"></div>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if case_id %}
+<script>
+const CASE_ID = {{ case_id|tojson }};
+const DEMO = {{ demo|tojson }};
+const MAX_PAIRS = {{ max_pairs }};
+const SCALE = 32;  // 每个像素放大到 32 CSS 像素
+
+const state = {
+  width: 0, height: 0, imageCount: 0,
+  reliable: [],
+  pairs: [],
+  // picking: null | {stage:'line'|'base', line:[x,y]|null}
+  picking: null,
+  lastResult: null,
+  solving: false,
+};
+
+const $ = (id) => document.getElementById(id);
+
+async function init() {
+  // 案例元信息：直接从第一张图的自然尺寸取得。
+  const img = $('pick-img');
+  img.src = `/case/${CASE_ID}/image/0`;
+  await img.decode();
+  state.width = img.naturalWidth;
+  state.height = img.naturalHeight;
+  img.style.width = (state.width * SCALE) + 'px';
+  img.style.height = (state.height * SCALE) + 'px';
+  img.style.imageRendering = 'pixelated';
+
+  const canvas = $('pick-canvas');
+  canvas.width = state.width;
+  canvas.height = state.height;
+  canvas.style.width = img.style.width;
+  canvas.style.height = img.style.height;
+
+  // 缩略图与可靠复选框
+  await buildThumbs();
+
+  if (DEMO && DEMO.suggested_pairs) {
+    state.pairs = DEMO.suggested_pairs.map(p => ({line: p[0], base: p[1]}));
+  }
+  renderPairs();
+  drawMarkers();
+
+  $('start-pair').addEventListener('click', startPair);
+  $('cancel-pair').addEventListener('click', cancelPair);
+  canvas.addEventListener('click', onCanvasClick);
+  $('pair-list').addEventListener('click', (e) => {
+    const li = e.target.closest('li[data-idx]');
+    if (!li) return;
+    state.pairs.splice(Number(li.dataset.idx), 1);
+    renderPairs(); drawMarkers(); markStale();
+  });
+  $('solve-btn').addEventListener('click', () => solve(true));
+
+  // 演示页自带建议点对，进入即求解，直接展示选灯效果
+  if (DEMO && DEMO.suggested_pairs) {
+    await solve(false);
+  }
+}
+
+async function buildThumbs() {
+  const wrap = $('thumbs');
+  // 通过一次轻量探测确定张数：依次请求直到 404
+  const urls = [];
+  for (let i = 0; i < 8; i++) {
+    const resp = await fetch(`/case/${CASE_ID}/image/${i}`);
+    if (!resp.ok) break;
+    urls.push(resp.url);
+  }
+  state.imageCount = urls.length;
+  state.reliable = urls.map(() => true);
+  urls.forEach((url, i) => {
+    const figure = document.createElement('figure');
+    figure.innerHTML = `
+      <img src="${url}" alt="原照 ${i + 1}">
+      <figcaption>第 ${i + 1} 张
+        <label class="reliable-label">
+          <input type="checkbox" data-img="${i}" checked> 可靠
+        </label>
+      </figcaption>`;
+    wrap.appendChild(figure);
+  });
+  wrap.addEventListener('change', (e) => {
+    const idx = e.target.dataset.img;
+    if (idx === undefined) return;
+    state.reliable[Number(idx)] = e.target.checked;
+    // 更改可靠标记后重选（自动重新求解）
+    if (state.lastResult) {
+      markStale();
+      solve(false);
+    }
+  });
+}
+
+function startPair() {
+  if (state.pairs.length >= MAX_PAIRS) {
+    $('pick-hint').textContent = `至多 ${MAX_PAIRS} 对点`;
+    return;
+  }
+  state.picking = { stage: 'line', line: null };
+  $('start-pair').hidden = true;
+  $('cancel-pair').hidden = false;
+  $('pick-hint').textContent = '请在图上点击一个刻线像素';
+}
+
+function cancelPair() {
+  state.picking = null;
+  $('start-pair').hidden = false;
+  $('cancel-pair').hidden = true;
+  $('pick-hint').textContent = '';
+}
+
+function onCanvasClick(event) {
+  if (!state.picking) return;
+  const rect = event.target.getBoundingClientRect();
+  const x = Math.floor((event.clientX - rect.left) / SCALE);
+  const y = Math.floor((event.clientY - rect.top) / SCALE);
+  if (x < 0 || y < 0 || x >= state.width || y >= state.height) return;
+
+  if (state.picking.stage === 'line') {
+    state.picking.line = [x, y];
+    state.picking.stage = 'base';
+    $('pick-hint').textContent = `刻线 (${x},${y}) 已选，请点击不同的底面像素`;
+    drawMarkers();
+  } else {
+    const [lx, ly] = state.picking.line;
+    if (lx === x && ly === y) {
+      $('pick-hint').textContent = '底面像素必须与刻线像素不同，请重选';
+      return;
+    }
+    state.pairs.push({ line: state.picking.line, base: [x, y] });
+    cancelPair();
+    renderPairs(); drawMarkers(); markStale();
+  }
+}
+
+function drawMarkers() {
+  const canvas = $('pick-canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const s = canvas.width / Number(canvas.style.width.replace('px', ''));
+  ctx.scale(1 / s, 1 / s);  // 用 CSS 像素坐标绘制
+  const unit = SCALE;
+
+  state.pairs.forEach((p, i) => {
+    drawDot(ctx, p.line[0], p.line[1], '#e23b3b', i + 1);
+    drawDot(ctx, p.base[0], p.base[1], '#2f6fe0', i + 1);
+  });
+  if (state.picking && state.picking.line) {
+    drawDot(ctx, state.picking.line[0], state.picking.line[1],
+            '#ff8a8a', '…');
+  }
+}
+
+function drawDot(ctx, x, y, color, label) {
+  const cx = x * SCALE + SCALE / 2, cy = y * SCALE + SCALE / 2;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(cx, cy, SCALE * 0.32, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = `bold ${Math.round(SCALE * 0.45)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(label), cx, cy + 1);
+}
+
+function renderPairs() {
+  const ol = $('pair-list');
+  ol.innerHTML = '';
+  state.pairs.forEach((p, i) => {
+    const li = document.createElement('li');
+    li.dataset.idx = i;
+    li.innerHTML = `第 ${i + 1} 对：刻线 (${p.line[0]},${p.line[1]})
+      ／底面 (${p.base[0]},${p.base[1]}) <span class="hint">（点击删除）</span>`;
+    ol.appendChild(li);
+  });
+}
+
+function markStale() {
+  if (state.lastResult) {
+    $('stale-note').hidden = false;
+    return true;
+  }
+  return false;
+}
+
+async function solve(manual) {
+  if (state.solving) return;
+  if (state.pairs.length < 1) {
+    if (manual) $('pick-hint').textContent = '请至少点选一对像素';
+    return;
+  }
+  if (!state.reliable.some(Boolean)) {
+    renderError('至少保留一张可靠原照');
+    return;
+  }
+  state.solving = true;
+  try {
+    const resp = await fetch('/solve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        case_id: CASE_ID,
+        pairs: state.pairs.map(p => [p.line, p.base]),
+        reliable: state.reliable,
+      }),
+    });
+    const body = await resp.json();
+    if (!resp.ok || body.error) {
+      renderError(body.error || ('求解失败 HTTP ' + resp.status));
+      state.lastResult = null;
+      return;
+    }
+    state.lastResult = body.result;
+    $('stale-note').hidden = true;
+    renderResult(body.result);
+  } catch (err) {
+    renderError('网络错误: ' + err);
+  } finally {
+    state.solving = false;
+  }
+}
+
+function renderError(msg) {
+  $('result').innerHTML =
+    `<div class="banner error-banner"><strong>错误：</strong>${escapeHtml(msg)}</div>`;
+}
+
+function renderResult(r) {
+  let html = '';
+
+  // 情形一：原照无共同解释——撤下旧推荐并提示
+  if (r.infeasible) {
+    html += `<div class="banner error-banner">
+      <strong>原照无共同解释。</strong>
+      在允许的排除选择（不排除或排除一张不可靠原照）下，
+      不存在同时满足全部像素 |L·r−g|≤2 且 z≥0 的反射向量，
+      旧推荐已撤下。请检查照明向量、可靠标记或裁片对齐。</div>`;
+    $('result').innerHTML = html;
+    return;
+  }
+
+  html += `<div class="banner info-banner">
+    可行解释（${r.feasible_exclusions.length} 种）：
+    ${r.feasible_exclusions.map(escapeHtml).join('；')}</div>`;
+
+  // 推荐横幅（合格且保证值为正，同分按输入顺序取首盏）
+  if (r.recommendation === null || r.guarantee === null) {
+    // 情形二：无灯可用——撤下旧推荐并提示
+    html += `<div class="banner warn-banner">
+      <strong>无灯可用。</strong>
+      没有任何备选灯在全部可行解释下同时满足全区预测灰度 ∈ [5,250]
+      且底面−刻线的保证灰度差为正，旧推荐已撤下。</div>`;
+  } else {
+    html += `<div class="banner ok-banner">
+      <strong>推荐：第 ${r.recommendation + 1} 盏备选灯</strong>
+      向量 (${r.verdicts[r.recommendation].vector.join(', ')})<br>
+      保证值（所有可行解释与点对中，最小的底面减刻线灰度差）=
+      <strong>${r.guarantee}</strong>（&gt; 0，同分按输入顺序取首盏）
+    </div>`;
+  }
+
+  html += `<table class="verdict-table"><thead><tr>
+    <th>序号</th><th>灯向量 (x,y,z)</th><th>是否合格</th>
+    <th>保证值（底面−刻线）</th><th>全区预测灰度范围</th><th>说明</th>
+    </tr></thead><tbody>`;
+  r.verdicts.forEach(v => {
+    const isRec = r.recommendation === v.index;
+    html += `<tr class="${isRec ? 'rec-row' : ''}">
+      <td>${v.index + 1}${isRec ? ' ★' : ''}</td>
+      <td>(${v.vector.join(', ')})</td>
+      <td>${v.qualified ? '合格' : '不合格'}</td>
+      <td>${v.guarantee === null ? '—' : v.guarantee}</td>
+      <td>${v.global_min === null ? '—' : `[${v.global_min}, ${v.global_max}]`}</td>
+      <td>${v.fail_reason ? escapeHtml(v.fail_reason) : '满足 [5,250] 灰度约束'}</td>
+    </tr>`;
+  });
+  html += '</tbody></table>';
+  $('result').innerHTML = html;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+}
+
+init().catch(err => renderError('初始化失败: ' + err));
+</script>
+{% endif %}
+{% endblock %}

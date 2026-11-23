@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>1. 上传原照裁片与照明数据</h2>
+  <p class="hint">
+    要求 {{ min_images }}～{{ max_images }} 张已对齐的灰度 PNG（Pillow 模式 L），
+    尺寸完全相同，每边至多 {{ max_side }} 像素；每张填写三维照明向量；
+    另填 {{ 2 }}～{{ 8 }} 个备选灯向量。
+  </p>
+  <form id="upload-form">
+    <div class="row">
+      <label>原照数量
+        <input type="number" id="image-count" min="{{ min_images }}"
+               max="{{ max_images }}" value="4">
+      </label>
+      <label>备选灯数量
+        <input type="number" id="candidate-count" min="2" max="8" value="3">
+      </label>
+    </div>
+
+    <h3>原照与照明向量</h3>
+    <div id="image-rows"></div>
+
+    <h3>备选灯向量</h3>
+    <div id="candidate-rows"></div>
+
+    <button type="submit" class="primary">上传并进入点选</button>
+    <p id="upload-error" class="error" hidden></p>
+  </form>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const imgRows = document.getElementById('image-rows');
+const candRows = document.getElementById('candidate-rows');
+const imgCount = document.getElementById('image-count');
+const candCount = document.getElementById('candidate-count');
+
+function vecInputs(prefix, name, defaults) {
+  let html = `<span class="vec-label">${name}</span>`;
+  for (let c = 0; c < 3; c++) {
+    const d = defaults ? defaults[c] : '';
+    html += `<input type="number" step="any" name="${prefix}_${c}"
+              placeholder="xyz"[c] value="${d}" required>`;
+  }
+  return html;
+}
+
+function renderImageRows() {
+  const n = Math.min(8, Math.max(4, Number(imgCount.value) || 4));
+  imgCount.value = n;
+  imgRows.innerHTML = '';
+  for (let i = 0; i < n; i++) {
+    const div = document.createElement('div');
+    div.className = 'form-row';
+    div.innerHTML =
+      `<label class="file-label">第 ${i + 1} 张
+         <input type="file" name="image" accept=".png,image/png" required>
+       </label>` + vecInputs(`light_${i}`, '照明向量 (x,y,z)');
+    imgRows.appendChild(div);
+  }
+}
+
+function renderCandidateRows() {
+  const n = Math.min(8, Math.max(2, Number(candCount.value) || 2));
+  candCount.value = n;
+  candRows.innerHTML = '';
+  for (let j = 0; j < n; j++) {
+    const div = document.createElement('div');
+    div.className = 'form-row';
+    div.innerHTML = vecInputs(`cand_${j}`, `备选灯 ${j + 1} (x,y,z)`);
+    candRows.appendChild(div);
+  }
+}
+
+imgCount.addEventListener('change', renderImageRows);
+candCount.addEventListener('change', renderCandidateRows);
+renderImageRows();
+renderCandidateRows();
+
+document.getElementById('upload-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errEl = document.getElementById('upload-error');
+  errEl.hidden = true;
+  const data = new FormData(e.target);
+  data.set('candidate_count', candCount.value);
+  try {
+    const resp = await fetch('/upload', { method: 'POST', body: data });
+    const body = await resp.json();
+    if (!resp.ok || body.error) {
+      errEl.textContent = body.error || ('上传失败 HTTP ' + resp.status);
+      errEl.hidden = false;
+      return;
+    }
+    location.href = '/case/' + body.case_id;
+  } catch (err) {
+    errEl.textContent = '网络错误: ' + err;
+    errEl.hidden = false;
+  }
+});
+</script>
+{% endblock %}
